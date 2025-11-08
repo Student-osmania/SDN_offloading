@@ -161,7 +161,7 @@ def build_topology():
         mode='g', 
         channel='1',
         position='20,50,0',
-        range=100,
+        range=200,
         dpid='0000000000000003',
         protocols='OpenFlow13'
     )
@@ -184,15 +184,19 @@ def build_topology():
     
     # UE sta1/n2 with dual interfaces (wlan0=LTE, wlan1=WiFi)
     sta1 = net.addStation(
-        'sta1', wlans=2, ip='10.0.0.2/24',
-        position='20,50,0', range=50
+        'sta1', wlans=2, ip='10.0.0.1/24',
+        position='20,45,0', range=50
     )
     
     # Background load stations (N5-N9 from paper)
-    sta2 = net.addStation('sta2', ip='10.0.0.3/24', position='185,45,0')
-    sta3 = net.addStation('sta3', ip='10.0.0.4/24', position='188,52,0')
-    sta4 = net.addStation('sta4', ip='10.0.0.5/24', position='192,48,0')
-    sta5 = net.addStation('sta5', ip='10.0.0.6/24', position='186,54,0')
+    sta2 = net.addStation('sta2', ip='10.0.0.2/24', position='6,45,0')
+    sta3 = net.addStation('sta3', ip='10.0.0.3/24', position='12,55,0')
+    sta4 = net.addStation('sta4', ip='10.0.0.4/24', position='30,40,0')
+    sta5 = net.addStation('sta5', ip='10.0.0.5/24', position='35,60,0')
+    sta6 = net.addStation('sta6', ip='10.0.0.6/24', position='185,45,0')
+    sta7 = net.addStation('sta7', ip='10.0.0.7/24', position='210,60,0')
+    sta8 = net.addStation('sta8', ip='10.0.0.8/24', position='200,40,0')
+    sta9 = net.addStation('sta9', ip='10.0.0.9/24', position='182,54,0')
 
     info('*** Configuring propagation model (exp=3.5)\n')
     net.setPropagationModel(model="logDistance", exp=3.5)
@@ -207,13 +211,13 @@ def build_topology():
     net.addLink(s_wifi, ap_wifi, bw=100)
 
     info('*** Plotting network\n')
-    net.plotGraph(max_x=120, max_y=100)
+    net.plotGraph(max_x=275, max_y=100)
 
     info('*** Starting mobility (0→100m over 50s)\n')
     net.startMobility(time=0, repetitions=1, ac_method='ssf')
-    net.mobility(sta1, 'start', time=31, position='20,50,0')
-    net.mobility(sta1, 'stop', time=130, position='200,50,0')
-    net.stopMobility(time=131)
+    net.mobility(sta1, 'start', time=51, position='20,45,0')
+    net.mobility(sta1, 'stop', time=150, position='200,50,0')
+    net.stopMobility(time=151)
 
     info('*** Building network\n')
     net.build()
