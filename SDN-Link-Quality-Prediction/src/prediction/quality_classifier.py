@@ -1,102 +1,103 @@
 #!/usr/bin/env python3
 """
-Quality Classifier - Section III-A2
-Deterministic classification using Tables 4-8 thresholds
+Link Quality Classifier - Threshold-based Classification
+Implements: Tables 4-6 (RSSI/PDR thresholds), Table 8 (Video quality)
 """
 
-class QualityClassifier:
+def classify_link(rssi, pdr):
     """
-    Deterministic channel quality classifier.
+    Classify link quality using Tables 4-6 thresholds
+    Combined priority: PDR first (as per Table 6)
     
-    Based on research paper Section III-A2 and Tables 4-8.
-    Classifies channel quality into Good, Intermediate, or Bad categories
-    using RSSI and PDR thresholds.
+    Args:
+        rssi: Received Signal Strength Indicator (dBm)
+        pdr: Packet Delivery Ratio (0-1)
+    
+    Returns:
+        (label, confidence): Quality label and confidence score
     """
     
-    def __init__(self):
-        """Initialize quality classifier with paper thresholds"""
-        
-        # General thresholds from Tables 4-5
-        self.rssi_good_threshold = -75.0   # dBm
-        self.rssi_bad_threshold = -87.0    # dBm
-        self.pdr_good_threshold = 0.85     # 85%
-        self.pdr_bad_threshold = 0.75      # 75%
-        
-        # Video-specific thresholds from Table 8
-        self.video_rssi_threshold = -87.0  # dBm
-        self.video_pdr_threshold = 0.75    # 75%
+    # Table 4: RSSI thresholds
+    # Good: ≥ -74 dBm
+    # Intermediate: -88 to -74 dBm
+    # Bad: ≤ -88 dBm
+    
+    # Table 5: PDR thresholds
+    # Good: ≥ 0.88
+    # Intermediate: 0.76 to 0.88
+    # Bad: ≤ 0.76
+    
+    # Table 6: Combined (PDR has priority)
+    rssi_norm = normalize_rssi(rssi)
+    pdr_norm = pdr
+    
+    # Combined score: 50% RSSI + 50% PDR
+    score = 0.5 * rssi_norm + 0.5 * pdr_norm
+    
+    # Classification logic (PDR first as per Table 6)
+    if pdr >= 0.88 and rssi >= -74:
+        label = 'Good'
+        confidence = score
+    elif pdr <= 0.76 or rssi <= -88:
+        label = 'Bad'
+        confidence = 1.0 - score
+    else:
+        label = 'Intermediate'
+        confidence = 0.5 + abs(0.5 - score)  # Distance from boundary
+    
+    return label, confidence
 
-    def classify(self, rssi: float, pdr: float) -> str:
-        """
-        Classify channel quality based on RSSI and PDR (Table 6).
-        
-        Classification rules (priority order):
-        1. Bad: PDR ≤ 0.75 OR RSSI ≤ -87 dBm
-        2. Good: PDR ≥ 0.85 AND RSSI ≥ -75 dBm
-        3. Intermediate: Otherwise
-        
-        Args:
-            rssi: Received Signal Strength Indicator (dBm)
-            pdr: Packet Delivery Ratio (0.0 to 1.0)
-        
-        Returns:
-            str: 'Good', 'Intermediate', or 'Bad'
-        """
-        try:
-            # Bad quality: either PDR or RSSI below bad threshold
-            if pdr <= self.pdr_bad_threshold or rssi <= self.rssi_bad_threshold:
-                return "Bad"
-            
-            # Good quality: both PDR and RSSI above good threshold
-            if pdr >= self.pdr_good_threshold and rssi >= self.rssi_good_threshold:
-                return "Good"
-            
-            # Intermediate quality: between thresholds
-            return "Intermediate"
-            
-        except Exception:
-            # Fallback to intermediate if any error
-            return "Intermediate"
+
+def classify_video_quality(rssi, pdr):
+    """
+    Table 8: Video quality thresholds for 1080p
+    RSSI ≥ -90 dBm, PDR ≥ 0.75
     
-    def classify_for_video(self, rssi: float, pdr: float) -> str:
-        """
-        Classify channel quality specifically for video applications (Table 8).
-        
-        Video requires higher quality thresholds to maintain QoE.
-        
-        Args:
-            rssi: Received Signal Strength Indicator (dBm)
-            pdr: Packet Delivery Ratio (0.0 to 1.0)
-        
-        Returns:
-            str: 'Good', 'Intermediate', or 'Bad'
-        """
-        # Bad quality for video: below video thresholds
-        if rssi <= self.video_rssi_threshold or pdr <= self.video_pdr_threshold:
-            return "Bad"
-        
-        # Good quality for video: well above thresholds
-        elif rssi >= -75.0 and pdr >= 0.85:
-            return "Good"
-        
-        # Intermediate quality for video
+    Returns:
+        (suitable, label): Whether link is suitable for video + quality label
+    """
+    
+    if rssi >= -90 and pdr >= 0.75:
+        if rssi >= -74 and pdr >= 0.88:
+            return True, 'Good'
         else:
-            return "Intermediate"
+            return True, 'Acceptable'
+    else:
+        return False, 'Insufficient'
+
+
+def normalize_rssi(rssi, rssi_min=-100.0, rssi_max=-50.0):
+    """
+    Normalize RSSI to [0, 1] range
     
-    def compute_rsrp(self, rssi: float, n_prb: int = 100) -> float:
-        """
-        Compute RSRP (Reference Signal Received Power) from RSSI.
-        
-        Based on Equation 11 from the paper:
-        RSRP = RSSI - 10*log10(12 * N_PRB)
-        
-        Args:
-            rssi: Received Signal Strength Indicator (dBm)
-            n_prb: Number of Physical Resource Blocks (default: 100)
-        
-        Returns:
-            float: RSRP in dBm
-        """
-        import math
-        rsrp = rssi - 10 * math.log10(12 * n_prb)
-        return rsrp
+    Args:
+        rssi: RSSI value in dBm
+        rssi_min: Minimum expected RSSI (default: -100 dBm)
+        rssi_max: Maximum expected RSSI (default: -50 dBm)
+    
+    Returns:
+        Normalized RSSI in [0, 1]
+    """
+    return max(0.0, min(1.0, (rssi - rssi_min) / (rssi_max - rssi_min)))
+
+
+def get_quality_thresholds():
+    """
+    Return all quality thresholds from Tables 4-8
+    Useful for testing and verification
+    """
+    return {
+        'rssi': {
+            'good': -74,
+            'bad': -88,
+            'video': -90  
+        },
+        'pdr': {
+            'good': 0.88,
+            'bad': 0.76,
+            'video': 0.75  
+        },
+        'rsrp': {
+            'threshold': -90  
+        }
+    }

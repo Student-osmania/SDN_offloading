@@ -1,227 +1,172 @@
 #!/usr/bin/env python3
 """
-Traffic Offloading Module - Algorithm 2 Implementation
-Flowlet-based multipath offloading (Section III-B3)
+Traffic Offloading Utilities - Algorithm 2 (Flowlet-based Multipath)
+Implements: Group table management, per-flow flowlet detection, Equations 8-10
 """
 
-from ryu.ofproto import ofproto_v1_3
 import time
+import csv
+import os
+from datetime import datetime
+
 
 class TrafficOffloader:
-    def __init__(self, datapath_lte, datapath_wifi):
-        """Initialize traffic offloader with LTE and WiFi datapaths"""
-        self.dp_lte = datapath_lte
-        self.dp_wifi = datapath_wifi
-        
-        # Port configuration (adjust based on your topology)
-        self.lte_port = 1  # Port to LTE network
-        self.wifi_port = 2  # Port to WiFi network
-        
-        # Flowlet parameters (Section III-B3, Algorithm 2)
-        self.flowlet_timeout = 0.050  # Δ = 50ms (idle timeout for flowlet detection)
-        self.last_packet_time = {}
-        self.current_flowlet_path = {}
-        
-        print("\n[FLOWLET] 📦 Traffic Offloader initialized")
-        print(f"[FLOWLET]    ├─ Flowlet timeout (Δ): {self.flowlet_timeout*1000:.0f} ms")
-        print(f"[FLOWLET]    ├─ LTE port: {self.lte_port}")
-        print(f"[FLOWLET]    └─ WiFi port: {self.wifi_port}\n")
+    """Implements Algorithm 2: Flowlet-based traffic splitting with per-flow state"""
     
-    def execute_offload(self, src_ip, dst_ip, wifi_load, lte_throughput, 
-                       wifi_throughput, volume_wifi=None):
-        """
-        Execute flowlet-based multipath offloading (Algorithm 2)
+    def __init__(self, datapath, logger):
+        self.datapath = datapath
+        self.logger = logger
+        self.group_installed = False
         
-        Args:
-            src_ip: Source IP address
-            dst_ip: Destination IP address
-            wifi_load: Current WiFi load (0.0 to 1.0)
-            lte_throughput: LTE throughput in Mbps
-            wifi_throughput: WiFi throughput in Mbps
-            volume_wifi: Volume to offload via WiFi (MB)
+        # Algorithm 2: Per-flow flowlet tracking
+        self.flowlet_times = {}
+        self.flowlet_threshold = 0.05  # Δ = 50ms (Algorithm 2, line 4)
         
-        Returns:
-            bool: True if offload successful, False otherwise
-        """
+        # Port assignments (Figure 4 topology)
+        self.lte_port = 1
+        self.wifi_port = 2
         
-        print(f"\n╔{'═'*78}╗")
-        print("║ FLOWLET-BASED OFFLOADING (ALGORITHM 2)".ljust(79) + "║")
-        print(f"╚{'═'*78}╝\n")
-        
-        print(f"[FLOWLET] 🔍 Evaluating offload conditions")
-        print(f"[FLOWLET]    ├─ Flow: {src_ip} → {dst_ip}")
-        print(f"[FLOWLET]    ├─ WiFi load: {wifi_load:.2f}")
-        print(f"[FLOWLET]    ├─ LTE throughput: {lte_throughput:.2f} Mbps")
-        print(f"[FLOWLET]    └─ WiFi throughput: {wifi_throughput:.2f} Mbps")
-        
-        # Check WiFi capacity (Algorithm 1, line 11)
-        if wifi_load >= 0.75:
-            print(f"[FLOWLET] ❌ WiFi OVERLOADED ({wifi_load:.2f} ≥ 0.75)")
-            return False
-        
-        print(f"[FLOWLET] ✅ WiFi load acceptable ({wifi_load:.2f} < 0.75)")
-        
-        # Calculate multipath split ratio (Algorithm 2, Line 8)
-        total_throughput = lte_throughput + wifi_throughput
-        if total_throughput <= 0:
-            return False
-        
-        lte_ratio = lte_throughput / total_throughput
-        wifi_ratio = wifi_throughput / total_throughput
-        
-        print(f"\n[FLOWLET] 📊 MULTIPATH SPLIT CALCULATION (Algorithm 2, Line 8)")
-        print(f"[FLOWLET]    ├─ Total throughput (D): {total_throughput:.2f} Mbps")
-        print(f"[FLOWLET]    ├─ LTE ratio (a₁): {lte_ratio:.3f} ({lte_ratio*100:.1f}%)")
-        print(f"[FLOWLET]    └─ WiFi ratio (a₂): {wifi_ratio:.3f} ({wifi_ratio*100:.1f}%)")
-        
-        # Install flowlet-based forwarding rules
-        self._install_flowlet_forwarding(src_ip, dst_ip, lte_ratio, wifi_ratio)
-        
-        return True
+        # Logging
+        this_dir = os.path.dirname(os.path.abspath(__file__))
+        project_root = os.path.abspath(os.path.join(this_dir, "..", ".."))
+        self.results_dir = os.path.join(project_root, "results")
+        os.makedirs(self.results_dir, exist_ok=True)
+        self.log_path = os.path.join(self.results_dir, "offload_log.csv")
+        self._init_log()
     
-    def _install_flowlet_forwarding(self, src_ip, dst_ip, lte_weight, wifi_weight):
-        """Install flowlet-based forwarding using OpenFlow group tables"""
-        
-        if not self.dp_lte:
-            print("[FLOWLET] ⚠️ Warning: LTE datapath not available")
-            return
-        
-        print(f"\n[FLOWLET] 🔧 INSTALLING FLOWLET-BASED FORWARDING")
-        
-        ofproto = self.dp_lte.ofproto
-        parser = self.dp_lte.ofproto_parser
-        
-        # Calculate frequency ranges (Algorithm 2, Line 8)
-        a1_upper = lte_weight
-        a2_lower = lte_weight
-        a2_upper = 1.0
-        
-        print(f"\n┌─ ALGORITHM 2: LINE 8 ─ Calculate frequency a₁ and a₂")
-        print(f"[FLOWLET]    ├─ a₁ = (0, D_LTE_avg/D] = (0, {a1_upper:.3f}]")
-        print(f"[FLOWLET]    └─ a₂ = (D_LTE_avg/D, 1] = ({a2_lower:.3f}, {a2_upper:.3f}]")
-        
-        # Install group table for multipath forwarding
-        self._install_flowlet_group_table(src_ip, dst_ip, lte_weight, wifi_weight)
+    def _init_log(self):
+        """Initialize offload log"""
+        with open(self.log_path, 'w', newline='') as f:
+            writer = csv.writer(f)
+            writer.writerow(['timestamp', 'flow_key', 'action', 'alpha', 
+                           'lte_weight', 'wifi_weight', 'lte_tput', 'wifi_tput', 
+                           'flowlet_gap_ms'])
     
-    def _install_flowlet_group_table(self, src_ip, dst_ip, lte_weight, wifi_weight):
-        """Install OpenFlow group table for flowlet-based multipath"""
+    def detect_flowlet(self, flow_key, current_time):
+        """Algorithm 2 Line 4: Detect flowlet boundary for specific flow"""
+        if flow_key not in self.flowlet_times:
+            self.flowlet_times[flow_key] = current_time
+            return True, 0.0
         
-        if not self.dp_lte:
-            return
+        gap = current_time - self.flowlet_times[flow_key]
+        is_new_flowlet = (gap > self.flowlet_threshold)
         
-        print(f"\n[FLOWLET] 🔨 INSTALLING OPENFLOW GROUP TABLE (Table 9)")
+        if is_new_flowlet:
+            self.flowlet_times[flow_key] = current_time
+            if self.logger:
+                self.logger.info("[FLOWLET] Flow %s: New flowlet (gap=%.3fs > Δ=%.3fs)",
+                               flow_key, gap, self.flowlet_threshold)
         
-        ofproto = self.dp_lte.ofproto
-        parser = self.dp_lte.ofproto_parser
+        return is_new_flowlet, gap
+    
+    def install_or_update_group(self, flow_key, alpha, lte_tput, wifi_tput):
+        """Algorithm 2 Lines 8-18: Install/update SELECT group table"""
         
-        # Convert weights to integers (bucket weights must be integers)
-        lte_bucket_weight = max(1, int(lte_weight * 100))
-        wifi_bucket_weight = max(1, int(wifi_weight * 100))
+        current_time = time.time()
+        is_new_flowlet, gap = self.detect_flowlet(flow_key, current_time)
         
-        print(f"[FLOWLET]    ├─ Group type: SELECT (Algorithm 2)")
-        print(f"[FLOWLET]    ├─ Group ID: 1")
-        print(f"[FLOWLET]    ├─ Bucket 1 (LTE): weight={lte_bucket_weight}, action=output:port {self.lte_port}")
-        print(f"[FLOWLET]    └─ Bucket 2 (WiFi): weight={wifi_bucket_weight}, action=output:port {self.wifi_port}")
+        if not is_new_flowlet and self.group_installed:
+            if self.logger:
+                self.logger.info("[FLOWLET] Gap=%.3fs < Δ=%.3fs, skip update",
+                               gap, self.flowlet_threshold)
+            return True
         
-        # Create buckets for multipath forwarding
+        # Algorithm 2 Line 8: Calculate frequencies (weights)
+        lte_weight = max(1, int((1 - alpha) * 100))
+        wifi_weight = max(1, int(alpha * 100))
+        
+        if self.logger:
+            self.logger.info("[FLOWLET] New flowlet detected (gap=%.3fs)", gap)
+            self.logger.info("[FLOWLET] Weights: LTE=%d, WiFi=%d", lte_weight, wifi_weight)
+        
+        ofproto = self.datapath.ofproto
+        parser = self.datapath.ofproto_parser
+        
+        # Algorithm 2 Lines 12-17: Create buckets
         buckets = [
             parser.OFPBucket(
-                weight=lte_bucket_weight,
+                weight=lte_weight,
                 watch_port=ofproto.OFPP_ANY,
                 watch_group=ofproto.OFPG_ANY,
                 actions=[parser.OFPActionOutput(self.lte_port)]
             ),
             parser.OFPBucket(
-                weight=wifi_bucket_weight,
+                weight=wifi_weight,
                 watch_port=ofproto.OFPP_ANY,
                 watch_group=ofproto.OFPG_ANY,
                 actions=[parser.OFPActionOutput(self.wifi_port)]
             )
         ]
         
-        group_id = 1
+        # Algorithm 2 Line 18: Install or modify group
+        if not self.group_installed:
+            command = ofproto.OFPGC_ADD
+            action = 'INSTALL'
+            self.group_installed = True
+        else:
+            command = ofproto.OFPGC_MODIFY
+            action = 'UPDATE'
         
-        # Delete existing group if present
         try:
-            del_req = parser.OFPGroupMod(
-                self.dp_lte,
-                ofproto.OFPGC_DELETE,
+            req = parser.OFPGroupMod(
+                self.datapath,
+                command,
                 ofproto.OFPGT_SELECT,
-                group_id
+                group_id=1,
+                buckets=buckets
             )
-            self.dp_lte.send_msg(del_req)
-            time.sleep(0.1)
-        except:
-            pass
-        
-        # Add new group table entry
-        req = parser.OFPGroupMod(
-            self.dp_lte,
-            ofproto.OFPGC_ADD,
-            ofproto.OFPGT_SELECT,
-            group_id,
-            buckets
-        )
-        
-        try:
-            self.dp_lte.send_msg(req)
-            print(f"[FLOWLET] ✅ Group table {group_id} installed")
-            print(f"[FLOWLET]    └─ Traffic split: LTE={lte_bucket_weight}% / WiFi={wifi_bucket_weight}%")
+            self.datapath.send_msg(req)
+            
+            if self.logger:
+                self.logger.info("[GROUP] %s: group_id=1, type=SELECT", action)
+            
+            # Log to CSV
+            self._log_action(flow_key, action, alpha, lte_weight, wifi_weight, 
+                           lte_tput, wifi_tput, gap * 1000)
+            
+            return True
+            
         except Exception as e:
-            print(f"[FLOWLET] ❌ Error installing group table: {e}")
-        
-        # Install flow entry that uses the group table
-        self._install_flowlet_flow(src_ip, dst_ip, group_id)
+            if self.logger:
+                self.logger.error("[GROUP] Error: %s", str(e))
+            return False
     
-    def _install_flowlet_flow(self, src_ip, dst_ip, group_id):
-        """Install flow entry with idle timeout for flowlet detection"""
-        
-        if not self.dp_lte:
-            return
-        
-        print(f"\n[FLOWLET] 📋 INSTALLING FLOW ENTRY WITH IDLE TIMEOUT")
-        
-        ofproto = self.dp_lte.ofproto
-        parser = self.dp_lte.ofproto_parser
-        
-        # Match on IP flow
-        match = parser.OFPMatch(
-            eth_type=0x0800,
-            ipv4_src=src_ip,
-            ipv4_dst=dst_ip
-        )
-        
-        # Action: forward to group table
-        actions = [parser.OFPActionGroup(group_id)]
-        inst = [parser.OFPInstructionActions(ofproto.OFPIT_APPLY_ACTIONS, actions)]
-        
-        # Idle timeout implements flowlet detection (Algorithm 2)
-        # When idle_timeout expires, new packet triggers new flowlet
-        idle_timeout_sec = 1  # OpenFlow minimum, actual flowlet Δ = 50ms
-        
-        print(f"[FLOWLET]    ├─ Match: ipv4_src={src_ip}, ipv4_dst={dst_ip}")
-        print(f"[FLOWLET]    ├─ Action: Forward to group {group_id}")
-        print(f"[FLOWLET]    ├─ OpenFlow idle_timeout: {idle_timeout_sec}s")
-        print(f"[FLOWLET]    └─ Algorithm Δ: {self.flowlet_timeout*1000:.0f}ms")
-        
-        mod = parser.OFPFlowMod(
-            datapath=self.dp_lte,
-            priority=100,
-            match=match,
-            instructions=inst,
-            idle_timeout=idle_timeout_sec,
-            hard_timeout=0,
-            flags=ofproto.OFPFF_SEND_FLOW_REM
-        )
-        
+    def _log_action(self, flow_key, action, alpha, lte_w, wifi_w, lte_t, wifi_t, gap_ms):
+        """Log offload action"""
         try:
-            self.dp_lte.send_msg(mod)
-            print(f"[FLOWLET] ✅ Flow entry installed successfully")
-            print(f"\n[FLOWLET] 🎯 FLOWLET MECHANISM ACTIVE:")
-            print(f"[FLOWLET]    ├─ If (new_time - last_time) > Δ → new flowlet")
-            print(f"[FLOWLET]    ├─ Random path selection from weighted group")
-            print(f"[FLOWLET]    └─ Result: Packet reordering avoided within flowlets")
+            with open(self.log_path, 'a', newline='') as f:
+                writer = csv.writer(f)
+                flow_str = f"{flow_key[0]}→{flow_key[1]}" if flow_key else "unknown"
+                writer.writerow([
+                    datetime.now().isoformat(),
+                    flow_str, action, alpha, lte_w, wifi_w, lte_t, wifi_t, gap_ms
+                ])
         except Exception as e:
-            print(f"[FLOWLET] ❌ Error installing flow: {e}")
-        
-        print("\n" + "─"*80 + "\n")
+            if self.logger:
+                self.logger.error("[LOG] Error: %s", str(e))
+
+
+def log_offload_decision(alpha, throughput_lte, throughput_wifi, action, 
+                         results_dir=None):
+    """Standalone logging function for external use"""
+    this_dir = os.path.dirname(os.path.abspath(__file__))
+    project_root = os.path.abspath(os.path.join(this_dir, "..", ".."))
+
+    # default to project_root/results
+    if results_dir is None:
+        results_dir = os.path.join(project_root, "results")
+
+    os.makedirs(results_dir, exist_ok=True)
+    log_path = os.path.join(results_dir, "offload_decisions.csv")
+    
+    if not os.path.exists(log_path):
+        with open(log_path, 'w', newline='') as f:
+            writer = csv.writer(f)
+            writer.writerow(['timestamp', 'alpha', 'lte_tput', 'wifi_tput', 'action'])
+    
+    with open(log_path, 'a', newline='') as f:
+        writer = csv.writer(f)
+        writer.writerow([
+            datetime.now().isoformat(),
+            alpha, throughput_lte, throughput_wifi, action
+        ])
